@@ -1,6 +1,6 @@
 # whatsapp_automation.py
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Request, Response, Query
+from fastapi.responses import RedirectResponse, JSONResponse
 import requests
 import sqlite3
 import json
@@ -8,14 +8,11 @@ import json
 app = FastAPI()
 
 # ===== إعدادات OAuth واتساب =====
-CLIENT_ID = "791417150389817"        
-CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0" 
-REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"  
+CLIENT_ID = "791417150389817"
+CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"
+REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"
 
-# ===== تخزين مؤقت للدومين =====
-pending_shops = {}
-
-# ===== إنشاء قاعدة البيانات SQLite =====
+# ===== إنشاء قاعدة البيانات =====
 conn = sqlite3.connect("whatsapp_saas.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -49,7 +46,7 @@ async def shopify_webhook(request: Request):
             print("⚠️ No phone number found in order")
             return {"status": "no phone in order"}
 
-        # ✅ تحويل الرقم لصيغة دولية
+        # ✅ تحويل الرقم لصيغة دولية (افتراضي مصر)
         phone = phone.strip().replace(" ", "")
         if phone.startswith("0"):
             phone = "+20" + phone[1:]
@@ -147,40 +144,78 @@ async def whatsapp_webhook(request: Request):
     return {"status": "ok"}
 
 # ============================================================
-# 🧩 OAuth - ربط المتجر بواتساب
+# 🧩 OAuth - ربط المتجر بواتساب (الإصدار النهائي)
 # ============================================================
 @app.get("/connect-whatsapp")
-def connect_whatsapp(shop_domain: str):
-    # حفظ الدومين مؤقتًا
-    pending_shops["current"] = shop_domain
+def connect_whatsapp(shop_domain: str = Query(...)):
     oauth_url = (
         f"https://www.facebook.com/v16.0/dialog/oauth?"
-        f"client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=whatsapp_business_messaging"
+        f"client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&state={shop_domain}"  # ← نمرر الدومين في state
+        f"&scope=whatsapp_business_messaging,whatsapp_business_management"
     )
     return RedirectResponse(oauth_url)
 
+
 @app.get("/oauth-callback")
-def oauth_callback(code: str):
-    shop_domain = pending_shops.get("current", "unknown-shop")
-    print(f"🔁 OAuth callback for shop: {shop_domain}")
+def oauth_callback(code: str, state: str):
+    """state = shop_domain"""
+    try:
+        shop_domain = state
+        print(f"🔁 OAuth callback for shop: {shop_domain}")
 
-    token_resp = requests.get(
-        f"https://graph.facebook.com/v16.0/oauth/access_token"
-        f"?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&client_secret={CLIENT_SECRET}&code={code}"
-    )
-    data = token_resp.json()
-    access_token = data["access_token"]
+        # استبدال الكود بالتوكن
+        token_resp = requests.get(
+            f"https://graph.facebook.com/v16.0/oauth/access_token",
+            params={
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "client_secret": CLIENT_SECRET,
+                "code": code
+            }
+        )
+        token_data = token_resp.json()
+        print("🟢 Access Token Response:", token_data)
 
-    me = requests.get(f"https://graph.facebook.com/v16.0/me?fields=whatsapp_business_accounts&access_token={access_token}").json()
-    waba_id = me["whatsapp_business_accounts"]["data"][0]["id"]
-    phone_number_id = requests.get(f"https://graph.facebook.com/v16.0/{waba_id}/phone_numbers?access_token={access_token}").json()["data"][0]["id"]
+        if "access_token" not in token_data:
+            return JSONResponse({"error": "Failed to get access token", "details": token_data}, status_code=400)
 
-    cursor.execute("""
-        INSERT OR REPLACE INTO stores (shop_domain, access_token, phone_number_id, waba_id)
-        VALUES (?, ?, ?, ?)
-    """, (shop_domain, access_token, phone_number_id, waba_id))
-    conn.commit()
-    return {"status": "connected", "shop": shop_domain}
+        access_token = token_data["access_token"]
+
+        # جلب بيانات WABA
+        me = requests.get(
+            f"https://graph.facebook.com/v16.0/me?fields=whatsapp_business_accounts",
+            params={"access_token": access_token}
+        ).json()
+        print("🟢 WABA Info:", me)
+
+        if "whatsapp_business_accounts" not in me:
+            return JSONResponse({"error": "No WhatsApp Business Account linked", "details": me}, status_code=400)
+
+        waba_id = me["whatsapp_business_accounts"]["data"][0]["id"]
+
+        # جلب رقم واتساب
+        phone_resp = requests.get(
+            f"https://graph.facebook.com/v16.0/{waba_id}/phone_numbers",
+            params={"access_token": access_token}
+        ).json()
+        print("🟢 Phone Numbers:", phone_resp)
+
+        phone_number_id = phone_resp["data"][0]["id"]
+
+        # حفظ في قاعدة البيانات
+        cursor.execute("""
+            INSERT OR REPLACE INTO stores (shop_domain, access_token, phone_number_id, waba_id)
+            VALUES (?, ?, ?, ?)
+        """, (shop_domain, access_token, phone_number_id, waba_id))
+        conn.commit()
+
+        return JSONResponse({"status": "connected", "shop_domain": shop_domain})
+
+    except Exception as e:
+        print("❌ OAuth Callback Error:", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 # ============================================================
 # 🧩 للتحقق من Webhook (Meta Verification)
