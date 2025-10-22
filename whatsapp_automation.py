@@ -9,8 +9,11 @@ app = FastAPI()
 
 # ===== إعدادات OAuth واتساب =====
 CLIENT_ID = "791417150389817"        
-CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"  # ← حط هنا App Secret من Meta
-REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"  # ← ده لينك مشروعك الفعلي على Vercel
+CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0" 
+REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"  
+
+# ===== تخزين مؤقت للدومين =====
+pending_shops = {}
 
 # ===== إنشاء قاعدة البيانات SQLite =====
 conn = sqlite3.connect("whatsapp_saas.db", check_same_thread=False)
@@ -27,7 +30,7 @@ CREATE TABLE IF NOT EXISTS stores (
 conn.commit()
 
 # ============================================================
-# 📦 Shopify Webhook: يرسل رسالة واتساب عند إنشاء أوردر جديد
+# 📦 Shopify Webhook
 # ============================================================
 @app.post("/shopify-webhook")
 async def shopify_webhook(request: Request):
@@ -46,14 +49,14 @@ async def shopify_webhook(request: Request):
             print("⚠️ No phone number found in order")
             return {"status": "no phone in order"}
 
-        # ✅ تحويل الرقم لصيغة دولية (افتراضي مصر)
+        # ✅ تحويل الرقم لصيغة دولية
         phone = phone.strip().replace(" ", "")
         if phone.startswith("0"):
             phone = "+20" + phone[1:]
         elif not phone.startswith("+20"):
             phone = "+20" + phone
 
-        # جلب التوكن و phone_number_id من SQLite
+        # 🔹 جلب التوكن من قاعدة البيانات
         cursor.execute("SELECT access_token, phone_number_id FROM stores WHERE shop_domain=?", (shop_domain,))
         row = cursor.fetchone()
         if not row:
@@ -70,24 +73,22 @@ async def shopify_webhook(request: Request):
                 "name": "order_confirmation",
                 "language": {"code": "en"},
                 "components": [
-                    {
-                        "type": "body",
-                        "parameters": [
-                            {"type": "text", "text": customer_name},
-                            {"type": "text", "text": str(order_id)},
-                            {"type": "text", "text": str(total)},
-                        ],
-                    }
+                    {"type": "body",
+                     "parameters": [
+                         {"type": "text", "text": customer_name},
+                         {"type": "text", "text": str(order_id)},
+                         {"type": "text", "text": str(total)},
+                     ]},
                 ],
             },
         }
 
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
-        resp = requests.post(f"https://graph.facebook.com/v22.0/{phone_number_id}/messages", headers=headers, json=payload)
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
+            headers=headers, json=payload
+        )
         print("✅ WhatsApp API Response:", resp.text)
 
         return {"status": "message_sent", "whatsapp_resp": resp.text}
@@ -124,26 +125,18 @@ async def whatsapp_webhook(request: Request):
         print(f"💬 Message from {phone}: {text}")
 
         if text == "1":
-            reply = "✅ Your order has been confirmed. Thank you for shopping with us!"
+            reply = "✅ Your order has been confirmed. Thank you!"
         elif text == "2":
-            reply = "❌ Your order has been canceled as requested."
+            reply = "❌ Your order has been canceled."
         else:
-            reply = "Please reply with 1 to confirm or 2 to cancel your order."
+            reply = "Please reply with 1 to confirm or 2 to cancel."
 
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": phone,
-            "type": "text",
-            "text": {"body": reply},
-        }
+        payload = {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": reply}}
 
         cursor.execute("SELECT access_token FROM stores LIMIT 1")
         access_token = cursor.fetchone()[0]
 
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
         resp = requests.post("https://graph.facebook.com/v22.0/me/messages", headers=headers, json=payload)
         print("📤 Reply sent:", resp.text)
@@ -154,16 +147,27 @@ async def whatsapp_webhook(request: Request):
     return {"status": "ok"}
 
 # ============================================================
-# 🧩 OAuth لربط كل براند مع واتساب
+# 🧩 OAuth - ربط المتجر بواتساب
 # ============================================================
 @app.get("/connect-whatsapp")
 def connect_whatsapp(shop_domain: str):
-    oauth_url = f"https://www.facebook.com/v16.0/dialog/oauth?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=whatsapp_business_messaging"
+    # حفظ الدومين مؤقتًا
+    pending_shops["current"] = shop_domain
+    oauth_url = (
+        f"https://www.facebook.com/v16.0/dialog/oauth?"
+        f"client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=whatsapp_business_messaging"
+    )
     return RedirectResponse(oauth_url)
 
 @app.get("/oauth-callback")
-def oauth_callback(code: str, shop_domain: str):
-    token_resp = requests.get(f"https://graph.facebook.com/v16.0/oauth/access_token?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&client_secret={CLIENT_SECRET}&code={code}")
+def oauth_callback(code: str):
+    shop_domain = pending_shops.get("current", "unknown-shop")
+    print(f"🔁 OAuth callback for shop: {shop_domain}")
+
+    token_resp = requests.get(
+        f"https://graph.facebook.com/v16.0/oauth/access_token"
+        f"?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&client_secret={CLIENT_SECRET}&code={code}"
+    )
     data = token_resp.json()
     access_token = data["access_token"]
 
@@ -176,7 +180,7 @@ def oauth_callback(code: str, shop_domain: str):
         VALUES (?, ?, ?, ?)
     """, (shop_domain, access_token, phone_number_id, waba_id))
     conn.commit()
-    return {"status": "connected"}
+    return {"status": "connected", "shop": shop_domain}
 
 # ============================================================
 # 🧩 للتحقق من Webhook (Meta Verification)
