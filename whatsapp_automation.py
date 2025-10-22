@@ -168,3 +168,10 @@ async def verify_whatsapp(request: Request):
     ):
         return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
     return {"error": "verification failed"}
+
+# ==========================
+# Entry point for Vercel
+# ==========================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
