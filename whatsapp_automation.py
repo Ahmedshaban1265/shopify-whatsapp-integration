@@ -128,14 +128,23 @@ async def whatsapp_webhook(request: Request):
         else:
             reply = "Please reply with 1 to confirm or 2 to cancel."
 
-        payload = {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": reply}}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "text",
+            "text": {"body": reply}
+        }
 
-        cursor.execute("SELECT access_token FROM stores LIMIT 1")
-        access_token = cursor.fetchone()[0]
+        # ✅ إرسال الرد من الرقم الخاص بكل متجر
+        cursor.execute("SELECT access_token, phone_number_id FROM stores LIMIT 1")
+        access_token, phone_number_id = cursor.fetchone()
 
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
-        resp = requests.post("https://graph.facebook.com/v22.0/me/messages", headers=headers, json=payload)
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
+            headers=headers, json=payload
+        )
         print("📤 Reply sent:", resp.text)
 
     except Exception as e:
@@ -144,10 +153,14 @@ async def whatsapp_webhook(request: Request):
     return {"status": "ok"}
 
 # ============================================================
-# 🧩 OAuth - ربط المتجر بواتساب (الإصدار النهائي)
+# 🧩 OAuth - ربط المتجر بواتساب (Multi-client)
 # ============================================================
 @app.get("/connect-whatsapp")
 def connect_whatsapp(shop_domain: str = Query(...)):
+    # ✅ تحقق إن الدومين فعلاً دومين شوبيفاي
+    if not shop_domain.endswith(".myshopify.com"):
+        return JSONResponse({"error": "Invalid shop domain"}, status_code=400)
+
     oauth_url = (
         f"https://www.facebook.com/v16.0/dialog/oauth?"
         f"client_id={CLIENT_ID}"
@@ -182,7 +195,7 @@ def oauth_callback(code: str, state: str):
 
         access_token = token_data["access_token"]
 
-        # 🔹 جلب الـ WABA ID بشكل صحيح من Business Account
+        # 🔹 جلب الـ WABA ID
         waba_resp = requests.get(
             f"https://graph.facebook.com/v16.0/{BUSINESS_ID}",
             params={
