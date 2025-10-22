@@ -166,7 +166,7 @@ def connect_whatsapp(shop_domain: str = Query(...)):
         f"client_id={CLIENT_ID}"
         f"&redirect_uri={REDIRECT_URI}"
         f"&state={shop_domain}"
-        f"&scope=whatsapp_business_messaging,whatsapp_business_management,business_management"
+        f"&scope=whatsapp_business_messaging,whatsapp_business_management"
     )
     return RedirectResponse(oauth_url)
 
