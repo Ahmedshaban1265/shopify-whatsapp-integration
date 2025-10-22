@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: whatsapp-shopify
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn whatsapp_automation:app --host 0.0.0.0 --port 10000"
+    plan: free
