@@ -158,7 +158,7 @@ async def whatsapp_webhook(request: Request):
 # ============================================================
 @app.get("/connect-whatsapp")
 def connect_whatsapp(shop_domain: str):
-    oauth_url = f"https://www.facebook.com/v16.0/dialog/oauth?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=whatsapp_business_messaging,pages_show_list"
+    oauth_url = f"https://www.facebook.com/v16.0/dialog/oauth?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=whatsapp_business_messaging"
     return RedirectResponse(oauth_url)
 
 @app.get("/oauth-callback")
