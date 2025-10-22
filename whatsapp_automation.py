@@ -1,4 +1,3 @@
-# whatsapp_automation.py
 from fastapi import FastAPI, Request, Response, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 import requests
@@ -11,6 +10,7 @@ app = FastAPI()
 CLIENT_ID = "791417150389817"
 CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"
 REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"
+BUSINESS_ID = "YOUR_META_BUSINESS_ID"  # ← ضع هنا الـ Business ID الحقيقي من Meta
 
 # ===== إنشاء قاعدة البيانات =====
 conn = sqlite3.connect("whatsapp_saas.db", check_same_thread=False)
@@ -152,11 +152,10 @@ def connect_whatsapp(shop_domain: str = Query(...)):
         f"https://www.facebook.com/v16.0/dialog/oauth?"
         f"client_id={CLIENT_ID}"
         f"&redirect_uri={REDIRECT_URI}"
-        f"&state={shop_domain}"  # ← نمرر الدومين في state
-        f"&scope=whatsapp_business_messaging,whatsapp_business_management"
+        f"&state={shop_domain}"
+        f"&scope=whatsapp_business_messaging,whatsapp_business_management,business_management"
     )
     return RedirectResponse(oauth_url)
-
 
 @app.get("/oauth-callback")
 def oauth_callback(code: str, state: str):
@@ -165,9 +164,9 @@ def oauth_callback(code: str, state: str):
         shop_domain = state
         print(f"🔁 OAuth callback for shop: {shop_domain}")
 
-        # استبدال الكود بالتوكن
+        # 🔹 استبدال الكود بالتوكن
         token_resp = requests.get(
-            f"https://graph.facebook.com/v16.0/oauth/access_token",
+            "https://graph.facebook.com/v16.0/oauth/access_token",
             params={
                 "client_id": CLIENT_ID,
                 "redirect_uri": REDIRECT_URI,
@@ -183,35 +182,41 @@ def oauth_callback(code: str, state: str):
 
         access_token = token_data["access_token"]
 
-        # جلب بيانات WABA
-        me = requests.get(
-            f"https://graph.facebook.com/v16.0/me?fields=whatsapp_business_accounts",
-            params={"access_token": access_token}
+        # 🔹 جلب الـ WABA ID بشكل صحيح من Business Account
+        waba_resp = requests.get(
+            f"https://graph.facebook.com/v16.0/{BUSINESS_ID}",
+            params={
+                "fields": "owned_whatsapp_business_accounts",
+                "access_token": access_token
+            }
         ).json()
-        print("🟢 WABA Info:", me)
+        print("🟢 WABA Response:", waba_resp)
 
-        if "whatsapp_business_accounts" not in me:
-            return JSONResponse({"error": "No WhatsApp Business Account linked", "details": me}, status_code=400)
+        if "owned_whatsapp_business_accounts" not in waba_resp:
+            return JSONResponse({"error": "No WhatsApp Business Account linked", "details": waba_resp}, status_code=400)
 
-        waba_id = me["whatsapp_business_accounts"]["data"][0]["id"]
+        waba_id = waba_resp["owned_whatsapp_business_accounts"]["data"][0]["id"]
 
-        # جلب رقم واتساب
+        # 🔹 جلب رقم واتساب من الـ WABA
         phone_resp = requests.get(
             f"https://graph.facebook.com/v16.0/{waba_id}/phone_numbers",
             params={"access_token": access_token}
         ).json()
         print("🟢 Phone Numbers:", phone_resp)
 
+        if "data" not in phone_resp or not phone_resp["data"]:
+            return JSONResponse({"error": "No phone numbers found in WABA", "details": phone_resp}, status_code=400)
+
         phone_number_id = phone_resp["data"][0]["id"]
 
-        # حفظ في قاعدة البيانات
+        # ✅ حفظ البيانات في قاعدة البيانات
         cursor.execute("""
             INSERT OR REPLACE INTO stores (shop_domain, access_token, phone_number_id, waba_id)
             VALUES (?, ?, ?, ?)
         """, (shop_domain, access_token, phone_number_id, waba_id))
         conn.commit()
 
-        return JSONResponse({"status": "connected", "shop_domain": shop_domain})
+        return JSONResponse({"status": "connected", "shop_domain": shop_domain, "waba_id": waba_id, "phone_number_id": phone_number_id})
 
     except Exception as e:
         print("❌ OAuth Callback Error:", e)
