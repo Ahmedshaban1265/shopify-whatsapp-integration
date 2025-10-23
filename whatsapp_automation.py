@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request, Response, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 import requests
-import sqlite3
+import psycopg2
+import os
 import json
 
 app = FastAPI()
@@ -10,14 +11,19 @@ app = FastAPI()
 CLIENT_ID = "791417150389817"
 CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"
 REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"
-BUSINESS_ID = "1050569033732680"  # ← Business ID (حاليًا test)
+BUSINESS_ID = "1050569033732680"  # ← Business ID (test)
 
-# ===== إنشاء قاعدة البيانات =====
-conn = sqlite3.connect("whatsapp_saas.db", check_same_thread=False)
+# ===== إعداد الاتصال بـ Supabase Postgres =====
+DATABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    "postgresql://postgres:AhmedECOM!#123@db.ssvsozpdicpuqzlqpxzi.supabase.co:5432/postgres"
+)
+
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS stores (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     shop_domain TEXT UNIQUE,
     access_token TEXT,
     phone_number_id TEXT,
@@ -54,7 +60,7 @@ async def shopify_webhook(request: Request):
             phone = "+20" + phone
 
         # 🔹 جلب التوكن من قاعدة البيانات
-        cursor.execute("SELECT access_token, phone_number_id FROM stores WHERE shop_domain=?", (shop_domain,))
+        cursor.execute("SELECT access_token, phone_number_id FROM stores WHERE shop_domain = %s", (shop_domain,))
         row = cursor.fetchone()
         if not row:
             return {"error": "store not connected to WhatsApp"}
@@ -152,7 +158,7 @@ async def whatsapp_webhook(request: Request):
     return {"status": "ok"}
 
 # ============================================================
-# 🧩 OAuth - ربط المتجر بواتساب (Multi-client)
+# 🧩 OAuth - ربط المتجر بواتساب
 # ============================================================
 @app.get("/connect-whatsapp")
 def connect_whatsapp(shop_domain: str = Query(...)):
@@ -170,12 +176,10 @@ def connect_whatsapp(shop_domain: str = Query(...)):
 
 @app.get("/oauth-callback")
 def oauth_callback(code: str, state: str):
-    """state = shop_domain"""
     try:
         shop_domain = state
         print(f"🔁 OAuth callback for shop: {shop_domain}")
 
-        # 🔹 استبدال الكود بالتوكن
         token_resp = requests.get(
             "https://graph.facebook.com/v16.0/oauth/access_token",
             params={
@@ -193,9 +197,6 @@ def oauth_callback(code: str, state: str):
 
         access_token = token_data["access_token"]
 
-        # =========================================================
-        # ✅ معالجة خاصة لو التوكن خاص بـ test environment
-        # =========================================================
         try:
             waba_resp = requests.get(
                 f"https://graph.facebook.com/v16.0/{BUSINESS_ID}",
@@ -221,7 +222,6 @@ def oauth_callback(code: str, state: str):
                 phone_number_id = phone_resp["data"][0]["id"]
 
             else:
-                # fallback for test environment
                 print("⚙️ Using fallback test WABA and number")
                 waba_id = "1050569033732680"
                 phone_number_id = "846928455172673"
@@ -231,18 +231,17 @@ def oauth_callback(code: str, state: str):
             waba_id = "1050569033732680"
             phone_number_id = "846928455172673"
 
-        # =========================================================
-        # ✅ حفظ البيانات في قاعدة البيانات
-        # =========================================================
         cursor.execute("""
-            INSERT OR REPLACE INTO stores (shop_domain, access_token, phone_number_id, waba_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO stores (shop_domain, access_token, phone_number_id, waba_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (shop_domain) DO UPDATE
+            SET access_token = EXCLUDED.access_token,
+                phone_number_id = EXCLUDED.phone_number_id,
+                waba_id = EXCLUDED.waba_id
         """, (shop_domain, access_token, phone_number_id, waba_id))
         conn.commit()
 
         print(f"✅ Store connected: {shop_domain} → {waba_id} / {phone_number_id}")
-        print("🔗 Connected successfully to WhatsApp Test Account (+1 555 167 1048)")
-
         return JSONResponse({
             "status": "connected",
             "shop_domain": shop_domain,
@@ -255,7 +254,7 @@ def oauth_callback(code: str, state: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ============================================================
-# 🧩 للتحقق من Webhook (Meta Verification)
+# 🧩 Meta Webhook Verification
 # ============================================================
 @app.get("/whatsapp-webhook")
 async def verify_whatsapp(request: Request):
@@ -265,7 +264,7 @@ async def verify_whatsapp(request: Request):
     return {"error": "verification failed"}
 
 # ============================================================
-# Entry point for Vercel / local run
+# Entry point
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
