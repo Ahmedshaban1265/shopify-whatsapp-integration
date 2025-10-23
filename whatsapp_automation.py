@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Response, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+from supabase import create_client
 import requests
-import psycopg2
 import os
 import json
 
@@ -11,26 +11,12 @@ app = FastAPI()
 CLIENT_ID = "791417150389817"
 CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"
 REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"
-BUSINESS_ID = "1050569033732680"  # ← Business ID (test)
+BUSINESS_ID = "1050569033732680"
 
-# ===== إعداد الاتصال بـ Supabase Postgres =====
-DATABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    "postgresql://postgres:AhmedECOM!#123@db.ssvsozpdicpuqzlqpxzi.supabase.co:5432/postgres"
-)
-
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS stores (
-    id SERIAL PRIMARY KEY,
-    shop_domain TEXT UNIQUE,
-    access_token TEXT,
-    phone_number_id TEXT,
-    waba_id TEXT
-)
-""")
-conn.commit()
+# ===== إعداد Supabase =====
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ssvsozpdicpuqzlqpxzi.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNzdnNvenBkaWNwdXF6bHFweHppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyMjM0NjgsImV4cCI6MjA3Njc5OTQ2OH0.sJmWRNwGf9plD170NroiAtKXfUZCS-kI7JRwzzn3MNM")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============================================================
 # 📦 Shopify Webhook
@@ -60,11 +46,11 @@ async def shopify_webhook(request: Request):
             phone = "+20" + phone
 
         # 🔹 جلب التوكن من قاعدة البيانات
-        cursor.execute("SELECT access_token, phone_number_id FROM stores WHERE shop_domain = %s", (shop_domain,))
-        row = cursor.fetchone()
-        if not row:
+        store_data = supabase.table("stores").select("*").eq("shop_domain", shop_domain).execute()
+        if not store_data.data:
             return {"error": "store not connected to WhatsApp"}
-        access_token, phone_number_id = row
+        access_token = store_data.data[0]["access_token"]
+        phone_number_id = store_data.data[0]["phone_number_id"]
 
         print(f"📞 Sending message to {phone} using phone_number_id {phone_number_id}")
 
@@ -87,11 +73,8 @@ async def shopify_webhook(request: Request):
         }
 
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-
-        resp = requests.post(
-            f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
-            headers=headers, json=payload
-        )
+        resp = requests.post(f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
+                             headers=headers, json=payload)
         print("✅ WhatsApp API Response:", resp.text)
 
         return {"status": "message_sent", "whatsapp_resp": resp.text}
@@ -134,6 +117,10 @@ async def whatsapp_webhook(request: Request):
         else:
             reply = "Please reply with 1 to confirm or 2 to cancel."
 
+        store_data = supabase.table("stores").select("*").limit(1).execute()
+        access_token = store_data.data[0]["access_token"]
+        phone_number_id = store_data.data[0]["phone_number_id"]
+
         payload = {
             "messaging_product": "whatsapp",
             "to": phone,
@@ -141,15 +128,9 @@ async def whatsapp_webhook(request: Request):
             "text": {"body": reply}
         }
 
-        cursor.execute("SELECT access_token, phone_number_id FROM stores LIMIT 1")
-        access_token, phone_number_id = cursor.fetchone()
-
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-
-        resp = requests.post(
-            f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
-            headers=headers, json=payload
-        )
+        resp = requests.post(f"https://graph.facebook.com/v22.0/{phone_number_id}/messages",
+                             headers=headers, json=payload)
         print("📤 Reply sent:", resp.text)
 
     except Exception as e:
@@ -220,7 +201,6 @@ def oauth_callback(code: str, state: str):
                     return JSONResponse({"error": "No phone numbers found in WABA", "details": phone_resp}, status_code=400)
 
                 phone_number_id = phone_resp["data"][0]["id"]
-
             else:
                 print("⚙️ Using fallback test WABA and number")
                 waba_id = "1050569033732680"
@@ -231,15 +211,12 @@ def oauth_callback(code: str, state: str):
             waba_id = "1050569033732680"
             phone_number_id = "846928455172673"
 
-        cursor.execute("""
-            INSERT INTO stores (shop_domain, access_token, phone_number_id, waba_id)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (shop_domain) DO UPDATE
-            SET access_token = EXCLUDED.access_token,
-                phone_number_id = EXCLUDED.phone_number_id,
-                waba_id = EXCLUDED.waba_id
-        """, (shop_domain, access_token, phone_number_id, waba_id))
-        conn.commit()
+        supabase.table("stores").upsert({
+            "shop_domain": shop_domain,
+            "access_token": access_token,
+            "phone_number_id": phone_number_id,
+            "waba_id": waba_id
+        }).execute()
 
         print(f"✅ Store connected: {shop_domain} → {waba_id} / {phone_number_id}")
         return JSONResponse({
