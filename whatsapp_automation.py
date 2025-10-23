@@ -10,7 +10,7 @@ app = FastAPI()
 CLIENT_ID = "791417150389817"
 CLIENT_SECRET = "448b4861c8d6804cffe6ea84bd67a6f0"
 REDIRECT_URI = "https://shopify-whatsapp-integration.vercel.app/oauth-callback"
-BUSINESS_ID = "YOUR_META_BUSINESS_ID"  # ← ضع هنا الـ Business ID الحقيقي من Meta
+BUSINESS_ID = "1050569033732680"  # ← ضع هنا الـ Business ID الحقيقي من Meta
 
 # ===== إنشاء قاعدة البيانات =====
 conn = sqlite3.connect("whatsapp_saas.db", check_same_thread=False)
